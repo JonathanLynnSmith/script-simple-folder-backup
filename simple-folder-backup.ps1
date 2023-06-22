@@ -5,7 +5,11 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$Destination,
     [Parameter(Mandatory = $true)]
-    [string]$Log
+    [string]$Log,
+    [Parameter(Mandatory = $false)]
+    [int]$RobocopyLogDaysThreshold = 0,
+    [Parameter(Mandatory = $false)]
+    [switch]$TestMode = $false
 )
 
 Set-Location -Path $PSScriptRoot
@@ -17,7 +21,6 @@ function Main{
     Check-Source-Folder
     Check-Destination-Folder
     Run-Backup
-    Check-Success
 }
 
 function Parse-Params{
@@ -90,16 +93,6 @@ function Check-Destination-Folder{
     }
 }
 
-function Check-Success {
-    # Check if robocopy command executed successfully
-    if ($LASTEXITCODE -eq 0) {
-        Log "Backup completed successfully."
-    } else {
-        Log "Error: Backup failed!"
-    }
-}
-
-
 function Create-Robocopy-Log {
     $logDirectory = Join-Path (Split-Path $Log -Parent) "Robocopy Logs"
     $logPath = Join-Path $logDirectory ("{0}.{1}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'), "robocopy.log")
@@ -121,11 +114,45 @@ function Create-Robocopy-Log {
     return $logPath
 }
 
+function Remove-OldLogs {
+    param (
+        [Parameter(Mandatory=$true)]
+        [string]$LogDirectory,
+        [Parameter(Mandatory=$true)]
+        [int]$DaysThreshold
+    )
+
+    if ($DaysThreshold -eq 0 -or $TestMode) {
+        return
+    }
+
+    $cutoffDate = (Get-Date).AddDays(-$DaysThreshold)
+
+    $logFiles = Get-ChildItem -Path $LogDirectory -File | Where-Object { $_.LastWriteTime -lt $cutoffDate }
+
+    if ($logFiles.Count -gt 0) {
+        Log "$($logFiles.Count) Logs found that are older than $cutoffDate, these will be deleted."
+        foreach ($logFile in $logFiles) {
+            Remove-Item -Path $logFile.FullName -Force
+            Write-Host "Deleted log file: $($logFile.Name)"
+        }
+    } else {
+        Write-Host "No log files older than $cutoffDate days found."
+    }
+}
+
+function Check-Success {
+    if ($LASTEXITCODE -eq 0 -or $? -eq $true) {
+        return $true
+    } else {
+        return $false
+    }
+}
+
+
+
 function Run-Backup {
     Log "Starting backup..."
-    Log "Source: $SOURCE_PATH"
-    Log "Destination: $DESTINATION_PATH"
-
     $robocopyLog = Create-Robocopy-Log
 
     $arguments = @()
@@ -134,10 +161,33 @@ function Run-Backup {
     $arguments += "/E"
     $arguments += "/tee"
     $arguments += "/log+:`"$robocopyLog`""
+    if ($TestMode) {
+        $arguments += "/L"
+    }
 
     Start-Process -FilePath "robocopy" -ArgumentList $arguments -NoNewWindow -Wait
+    
+    
+    if($TestMode){
+        $result = "TEST"
+        Log "Backup completed successfully."
+    }
+    elseif(Check-Success){
+        $result = "SUCCESS"
+        Log "Backup completed successfully."
+    }
+    else{
+        $result = "FAILED"
+        Log "Backup failed. Exit Code: $LASTEXITCODE"
+    }
+
+    $oldLogName = (Get-Item -Path $robocopyLog).Name
+    $newLogName = "{0}.{1}" -f $result, $oldLogName
+    Write-Host($newLogPath)
+    Rename-Item -Path $robocopyLog -NewName $newLogName -ErrorAction SilentlyContinue
+    
+
+    Remove-OldLogs -LogDirectory (Split-Path $robocopyLog -Parent) -DaysThreshold $RobocopyLogDaysThreshold
 }
-
-
 
 Main
